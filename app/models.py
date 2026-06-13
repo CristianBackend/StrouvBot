@@ -94,7 +94,15 @@ class ProcessedMessage(Base):
     created_at = Column(DateTime, default=dt.datetime.utcnow)
 
 
-engine = create_engine(DATABASE_URL, future=True)
+# pool_pre_ping: verifica que la conexión esté viva antes de usarla (Neon cierra las
+#   conexiones inactivas en el plan serverless; sin esto truena con "SSL connection closed").
+# pool_recycle: recicla conexiones con más de 5 min para no toparse con timeouts del lado del server.
+# Para SQLite (local) estos parámetros se ignoran sin problema.
+_engine_kwargs = {"future": True, "pool_pre_ping": True}
+if not DATABASE_URL.startswith("sqlite"):
+    _engine_kwargs["pool_recycle"] = 300
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 

@@ -5,8 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start -p ${PORT:-3000}"
-  },
+    "start": "next start -p 3000"
+},
   "dependencies": {
     "framer-motion": "11.3.8",
     "lucide-react": "0.414.0",
