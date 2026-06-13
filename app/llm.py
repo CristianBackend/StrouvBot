@@ -13,13 +13,14 @@ import anthropic
 
 from .config import HISTORY_WINDOW, MODEL_BRAIN
 from .models import Tenant
+from .money import _norm_envio  # normalizador autoritativo de envio_config (viejo y nuevo)
 from .orders import cotizar_db, productos_de, registrar_pedido
 from . import whatsapp as wa
 
 log = logging.getLogger("strouv.llm")
 claude = anthropic.Anthropic()  # ANTHROPIC_API_KEY del entorno
 
-PROMPT_TEMPLATE = (Path(__file__).parent / "prompt_template.md").read_text()
+PROMPT_TEMPLATE = (Path(__file__).parent / "prompt_template.md").read_text(encoding="utf-8")
 
 _ITEM_SCHEMA = {
     "type": "object",
@@ -31,33 +32,52 @@ _ITEM_SCHEMA = {
     "required": ["producto_id", "presentacion", "cantidad"],
 }
 
-TOOLS = [
-    {"name": "cotizar",
-     "description": "Calcula el total real (envío y promos aplicados) antes de cerrar. Único que decide el precio.",
-     "input_schema": {"type": "object", "properties": {
-         "items": {"type": "array", "items": _ITEM_SCHEMA},
-         "metodo_envio": {"type": "string", "enum": ["caribe_tours", "delivery_gsd"]}},
-         "required": ["items"]}},
-    {"name": "registrar_pedido",
-     "description": "Registra el pedido al confirmar nombre, dirección y teléfono (antes del pago).",
-     "input_schema": {"type": "object", "properties": {
-         "items": {"type": "array", "items": _ITEM_SCHEMA},
-         "nombre": {"type": "string"}, "direccion": {"type": "string"},
-         "telefono": {"type": "string"}, "pago": {"type": "string"},
-         "metodo_envio": {"type": "string", "enum": ["caribe_tours", "delivery_gsd"]}},
-         "required": ["items", "nombre", "direccion", "telefono"]}},
-    {"name": "enviar_datos_pago",
-     "description": "Envía al cliente el mensaje literal con la cuenta. Tú nunca escribes el número.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "enviar_foto", "description": "Envía la foto real de un producto.",
-     "input_schema": {"type": "object", "properties": {"producto_id": {"type": "string"}},
-                      "required": ["producto_id"]}},
-    {"name": "enviar_catalogo", "description": "Envía el catálogo (PDF).",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "escalar_a_humano", "description": "Pasa la conversación al encargado.",
-     "input_schema": {"type": "object", "properties": {"motivo": {"type": "string"}},
-                      "required": ["motivo"]}},
-]
+def _metodo_envio_schema(tenant: Tenant) -> dict:
+    """Schema de metodo_envio con los ids REALES de las zonas del tenant.
+
+    El enum debe reflejar la config del negocio; si se hardcodea, el modelo
+    queda obligado por la API a mandar ids que no existen y cotizar() siempre
+    falla con "método de envío desconocido" → el bot no puede cerrar y escala.
+    """
+    cfg = _norm_envio(tenant.envio_config or {})
+    ids = [m["id"] for m in cfg.get("metodos", []) if m.get("id")]
+    schema = {"type": "string",
+              "description": "id de la zona/método de envío del negocio (ver 'Envío' en el system)"}
+    if ids:  # un enum vacío es inválido para la API; sin ids, dejarlo string libre
+        schema["enum"] = ids
+    return schema
+
+
+def build_tools(tenant: Tenant) -> list:
+    """Tools por-tenant: el enum de metodo_envio se llena con las zonas reales."""
+    metodo_envio = _metodo_envio_schema(tenant)
+    return [
+        {"name": "cotizar",
+         "description": "Calcula el total real (envío y promos aplicados) antes de cerrar. Único que decide el precio.",
+         "input_schema": {"type": "object", "properties": {
+             "items": {"type": "array", "items": _ITEM_SCHEMA},
+             "metodo_envio": metodo_envio},
+             "required": ["items"]}},
+        {"name": "registrar_pedido",
+         "description": "Registra el pedido al confirmar nombre, dirección y teléfono (antes del pago).",
+         "input_schema": {"type": "object", "properties": {
+             "items": {"type": "array", "items": _ITEM_SCHEMA},
+             "nombre": {"type": "string"}, "direccion": {"type": "string"},
+             "telefono": {"type": "string"}, "pago": {"type": "string"},
+             "metodo_envio": metodo_envio},
+             "required": ["items", "nombre", "direccion", "telefono"]}},
+        {"name": "enviar_datos_pago",
+         "description": "Envía al cliente el mensaje literal con la cuenta. Tú nunca escribes el número.",
+         "input_schema": {"type": "object", "properties": {}}},
+        {"name": "enviar_foto", "description": "Envía la foto real de un producto.",
+         "input_schema": {"type": "object", "properties": {"producto_id": {"type": "string"}},
+                          "required": ["producto_id"]}},
+        {"name": "enviar_catalogo", "description": "Envía el catálogo (PDF).",
+         "input_schema": {"type": "object", "properties": {}}},
+        {"name": "escalar_a_humano", "description": "Pasa la conversación al encargado.",
+         "input_schema": {"type": "object", "properties": {"motivo": {"type": "string"}},
+                          "required": ["motivo"]}},
+    ]
 
 
 def build_system(tenant: Tenant, productos: dict) -> str:
@@ -131,12 +151,12 @@ class ToolContext:
 async def _ejecutar_tool(ctx: ToolContext, name: str, args: dict) -> dict:
     if name == "cotizar":
         return cotizar_db(ctx.session, ctx.tenant, args.get("items", []),
-                          args.get("metodo_envio", "caribe_tours"))
+                          args.get("metodo_envio", "auto"))
     if name == "registrar_pedido":
         r = registrar_pedido(ctx.session, ctx.tenant, ctx.cliente_wa, args.get("items", []),
                              args.get("nombre", ""), args.get("direccion", ""),
                              args.get("telefono", ""), args.get("pago", ""),
-                             args.get("metodo_envio", "caribe_tours"))
+                             args.get("metodo_envio", "auto"))
         if "order_id" in r:
             ctx.pedido_registrado = r
         return r
@@ -174,12 +194,13 @@ async def responder(ctx: ToolContext, history: list, user_text: str) -> str:
     """history = [{role, content: str}] persistido. El loop usa una copia local."""
     productos = productos_de(ctx.session, ctx.tenant.id)
     system = build_system(ctx.tenant, productos)
+    tools = build_tools(ctx.tenant)  # enum de metodo_envio con las zonas reales de ESTE tenant
     work = [{"role": m["role"], "content": m["content"]} for m in history[-HISTORY_WINDOW:]]
     work.append({"role": "user", "content": user_text})
 
     def _call(messages):
         return claude.messages.create(model=MODEL_BRAIN, max_tokens=1024,
-                                      system=system, tools=TOOLS, messages=messages)
+                                      system=system, tools=tools, messages=messages)
 
     msg = await asyncio.to_thread(_call, work)
     for _ in range(8):  # tope de iteraciones de tools por turno
