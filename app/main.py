@@ -7,16 +7,19 @@ Verificación de pago sin panel (v1): el dueño responde por WhatsApp
 "PAGADO <id>" / "DESPACHADO <id>" / "CANCELADO <id>" y eso actualiza el pedido.
 """
 import asyncio
+import json
 import logging
 import re
 
 from fastapi import FastAPI, Request, Response
 from sqlalchemy.exc import IntegrityError
 
-from .config import DEBOUNCE_SECONDS, HISTORY_WINDOW, VERIFY_TOKEN
+from .config import (DATABASE_URL, DEBOUNCE_SECONDS, HISTORY_WINDOW,
+                     JWT_SECRET_ES_DEFAULT, META_APP_SECRET, VERIFY_TOKEN)
 from .llm import ToolContext, responder
 from .models import Conversation, ProcessedMessage, SessionLocal, Tenant, init_db
 from .orders import cambiar_estado
+from .security import verificar_firma_meta
 from . import whatsapp as wa
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -34,9 +37,18 @@ _tasks: dict[tuple, asyncio.Task] = {}
 _OWNER_CMD = re.compile(r"^\s*(PAGADO|DESPACHADO|CANCELADO)\s+(\d+)\s*$", re.I)
 _ESTADOS = {"PAGADO": "pagado", "DESPACHADO": "despachado", "CANCELADO": "cancelado"}
 
+# Mensaje neutral cuando el turno falla (LLM caído, etc.): no dejar al cliente en silencio.
+FALLBACK_ERROR = "Perdona, se me cruzaron los cables un segundo 🙏 Dame un momentito y te sigo atendiendo."
+
 
 @app.on_event("startup")
 def startup():
+    # En producción (BD no-SQLite) el JWT_SECRET por defecto haría falsificables los tokens
+    # del panel: abortar el arranque antes que correr inseguro.
+    if JWT_SECRET_ES_DEFAULT and not DATABASE_URL.startswith("sqlite"):
+        raise RuntimeError(
+            "JWT_SECRET sin configurar en producción: los tokens del panel serían "
+            "falsificables. Define JWT_SECRET (largo y aleatorio) en el entorno.")
     init_db()
 
 
@@ -50,7 +62,16 @@ async def verify(request: Request):
 
 @app.post("/webhook")
 async def inbound(request: Request):
-    body = await request.json()
+    raw = await request.body()
+    # C1: verificar que el webhook venga de Meta (firma HMAC con el App Secret).
+    if META_APP_SECRET:
+        if not verificar_firma_meta(raw, request.headers.get("X-Hub-Signature-256")):
+            log.warning("webhook rechazado: firma X-Hub-Signature-256 inválida o ausente")
+            return Response(status_code=403)
+    else:
+        log.warning("META_APP_SECRET sin configurar — webhook SIN verificar firma "
+                    "(configúralo en Railway para activar la protección)")
+    body = json.loads(raw)
     msgs = wa.parse_webhook(body)
     log.info("webhook POST recibido: %d mensaje(s) | keys=%s", len(msgs), list(body.keys()))
     for phone_id, wa_from, message_id, texto, tipo in msgs:
@@ -73,6 +94,9 @@ async def _handle(phone_id, wa_from, message_id, texto, tipo):
         tenant = session.query(Tenant).filter(Tenant.wa_phone_id == phone_id).first()
         if not tenant:
             log.warning("phone_id sin tenant: %s", phone_id)
+            return
+        if not tenant.activo:  # tenant suspendido por el super-admin: el bot no opera
+            log.info("tenant suspendido, ignorando mensaje: %s", tenant.id)
             return
 
         # Comandos del dueño: verificación de pago sin panel.
@@ -113,8 +137,12 @@ async def _flush_later(key, phone_id, wa_from):
 
 async def _procesar(phone_id, wa_from, texto):
     session = SessionLocal()
+    tenant = None
+    respondido = False
     try:
         tenant = session.query(Tenant).filter(Tenant.wa_phone_id == phone_id).first()
+        if not tenant or not tenant.activo:  # suspendido entre el debounce y ahora
+            return
         conv = session.get(Conversation, (tenant.id, wa_from)) or Conversation(
             tenant_id=tenant.id, cliente_wa=wa_from, history=[])
         if conv.escalada:
@@ -134,6 +162,7 @@ async def _procesar(phone_id, wa_from, texto):
 
         if final:
             await wa.send_text(tenant, wa_from, final)
+        respondido = True  # el cliente ya fue atendido; un fallo posterior no debe disparar fallback
 
         # Notificaciones al dueño.
         if ctx.pedido_registrado:
@@ -148,5 +177,11 @@ async def _procesar(phone_id, wa_from, texto):
     except Exception:
         log.exception("procesando mensaje de %s", wa_from)
         session.rollback()
+        # I2: no dejar al cliente en silencio si el turno reventó antes de responderle.
+        if tenant is not None and not respondido:
+            try:
+                await wa.send_text(tenant, wa_from, FALLBACK_ERROR)
+            except Exception:
+                log.exception("el fallback a %s también falló", wa_from)
     finally:
         session.close()
