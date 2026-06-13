@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────
+#  SECRETOS Y ENTORNO — NUNCA suben a GitHub
+# ─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+panel/.env.local
+panel/.env.*
+!panel/.env.local.example
+*.env
+secretos.txt
+
+# ─────────────────────────────────────────────
+#  BASE DE DATOS LOCAL
+# ─────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+strouv.db
+
+# ─────────────────────────────────────────────
+#  HERRAMIENTAS DE IA / EDITOR (Claude, etc.)
+# ─────────────────────────────────────────────
+.claude/
+.cursor/
+.windsurf/
+.aider*
+.continue/
+CLAUDE.md
+.github/copilot-instructions.md
+
+# ─────────────────────────────────────────────
+#  PYTHON
+# ─────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ─────────────────────────────────────────────
+#  NODE / NEXT.JS
+# ─────────────────────────────────────────────
+node_modules/
+panel/node_modules/
+panel/.next/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ─────────────────────────────────────────────
+#  UPLOADS LOCALES (en prod van a Cloudinary)
+# ─────────────────────────────────────────────
+uploads/
+
+# ─────────────────────────────────────────────
+#  SISTEMA OPERATIVO
+# ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+
+# ─────────────────────────────────────────────
+#  EDITORES
+# ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─────────────────────────────────────────────
+#  LOGS Y TEMPORALES
+# ─────────────────────────────────────────────
+*.log
+logs/
+tmp/
+temp/

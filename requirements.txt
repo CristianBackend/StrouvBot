@@ -1,0 +1,12 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+anthropic>=0.40
+sqlalchemy>=2.0
+httpx>=0.27
+psycopg2-binary>=2.9   # Postgres en producción; local corre con SQLite sin esto
+pytest>=8.0
+bcrypt>=4.1
+pyjwt>=2.8
+pydantic[email]>=2.6
+python-multipart>=0.0.9
+cloudinary>=1.40  # opcional: solo si usas almacenamiento en la nube
