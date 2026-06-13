@@ -19,7 +19,9 @@ from .models import Conversation, ProcessedMessage, SessionLocal, Tenant, init_d
 from .orders import cambiar_estado
 from . import whatsapp as wa
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("strouv")
+log.setLevel(logging.INFO)
 app = FastAPI(title="Strouv — bot vendedor por WhatsApp")
 
 # API de administración (la consume el panel Next.js)
@@ -49,7 +51,10 @@ async def verify(request: Request):
 @app.post("/webhook")
 async def inbound(request: Request):
     body = await request.json()
-    for phone_id, wa_from, message_id, texto, tipo in wa.parse_webhook(body):
+    msgs = wa.parse_webhook(body)
+    log.info("webhook POST recibido: %d mensaje(s) | keys=%s", len(msgs), list(body.keys()))
+    for phone_id, wa_from, message_id, texto, tipo in msgs:
+        log.info("  -> phone_id=%s from=%s tipo=%s", phone_id, wa_from, tipo)
         asyncio.create_task(_handle(phone_id, wa_from, message_id, texto, tipo))
     return {"ok": True}  # 200 inmediato; todo lo demás es async
 
