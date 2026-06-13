@@ -19,7 +19,8 @@ from . import whatsapp as wa
 log = logging.getLogger("strouv.llm")
 claude = anthropic.Anthropic()  # ANTHROPIC_API_KEY del entorno
 
-PROMPT_TEMPLATE = (Path(__file__).parent / "prompt_template.md").read_text(encoding="utf-8")
+PROMPT_TEMPLATE = (Path(__file__).parent / "prompt_template.md").read_text()
+
 _ITEM_SCHEMA = {
     "type": "object",
     "properties": {
@@ -67,12 +68,47 @@ def build_system(tenant: Tenant, productos: dict) -> str:
         f"(stock: {p['stock_decant'] or 'AGOTADO'})"
         for pid, p in productos.items()
     )
-    e = tenant.envio_config
-    envio = (f"Caribe Tours/Vimenca RD${e['costo']}; gratis en compras de RD${e['gratis_desde']}+; "
-             f"delivery GSD RD${e['delivery_gsd']}.")
-    d = tenant.descuento_config
-    descuento = (f"precios fijos; en {d['min_frascos']}+ frascos, RD${d['monto']} menos"
-                 f"{' o envío gratis' if d.get('o_envio_gratis') else ''}. Más que eso, escalar.")
+    e = tenant.envio_config or {}
+    if e.get("metodos"):
+        partes = []
+        for m in e["metodos"]:
+            if m.get("tipo") == "retiro":
+                partes.append(f"{m['nombre']} (gratis)")
+            else:
+                partes.append(f"{m['nombre']} RD${m.get('costo', 0)}")
+        envio = "; ".join(partes)
+        if e.get("gratis_activo") and e.get("gratis_desde", 0) > 0:
+            envio += f". Envío gratis en compras de RD${e['gratis_desde']}+"
+        envio += ". El cliente dice su dirección; ubícalo en la zona correcta y CONFIRMA el costo antes de cobrar."
+    else:
+        # formato viejo (retrocompatible)
+        envio = (f"Envío RD${e.get('costo', 0)}; gratis en compras de RD${e.get('gratis_desde', 0)}+; "
+                 f"delivery GSD RD${e.get('delivery_gsd', 0)}.")
+
+    d = tenant.descuento_config or {}
+    if d.get("promos") is not None:
+        activas = [p for p in d.get("promos", []) if p.get("activo", True)]
+        if activas:
+            desc_partes = []
+            for p in activas:
+                t = p.get("tipo")
+                if t == "cantidad_frascos":
+                    extra = f"RD${p.get('monto', 0)} menos" if p.get("monto") else ""
+                    if p.get("envio_gratis"):
+                        extra += (" o " if extra else "") + "envío gratis"
+                    desc_partes.append(f"en {p.get('min_frascos', 2)}+ frascos: {extra}")
+                elif t == "monto_minimo":
+                    extra = f"{p.get('porcentaje', 0)}% menos" if p.get("porcentaje") else f"RD${p.get('monto', 0)} menos"
+                    desc_partes.append(f"en compras de RD${p.get('minimo', 0)}+: {extra}")
+                elif t == "porcentaje":
+                    desc_partes.append(f"{p.get('porcentaje', 0)}% de descuento general")
+            descuento = "; ".join(desc_partes) + ". Más que eso, escalar."
+        else:
+            descuento = "Precios fijos, sin promociones activas. Cualquier rebaja extra, escalar."
+    else:
+        # formato viejo (retrocompatible)
+        descuento = (f"precios fijos; en {d.get('min_frascos', 99)}+ frascos, RD${d.get('monto', 0)} menos"
+                     f"{' o envío gratis' if d.get('o_envio_gratis') else ''}. Más que eso, escalar.")
     return (PROMPT_TEMPLATE
             .replace("{{NOMBRE_NEGOCIO}}", tenant.nombre)
             .replace("{{RUBRO}}", tenant.rubro)
