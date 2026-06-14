@@ -140,6 +140,16 @@ async def _flush_later(key, phone_id, wa_from):
         await _procesar(phone_id, wa_from, "\n".join(textos))
 
 
+async def _avisar_dueno(tenant, mensaje):
+    """Notificación al dueño: best-effort. Es secundaria; su fallo (ej. número no autorizado
+    en el número de prueba de Meta, #131030) NUNCA debe tumbar la venta al cliente."""
+    try:
+        await wa.send_text(tenant, tenant.owner_wa, mensaje)
+    except Exception:
+        log.exception("no se pudo notificar al dueño %s; la venta al cliente sigue OK",
+                      tenant.owner_wa)
+
+
 async def _procesar(phone_id, wa_from, texto):
     session = SessionLocal()
     tenant = None
@@ -172,15 +182,15 @@ async def _procesar(phone_id, wa_from, texto):
             await wa.send_text(tenant, wa_from, final)
         respondido = True  # el cliente ya fue atendido; un fallo posterior no debe disparar fallback
 
-        # Notificaciones al dueño.
+        # Notificaciones al dueño (secundarias, best-effort: nunca tumban la venta al cliente).
         if ctx.pedido_registrado:
             r = ctx.pedido_registrado
-            await wa.send_text(tenant, tenant.owner_wa,
+            await _avisar_dueno(tenant,
                 f"🛒 Pedido #{r['order_id']} de {wa_from} — RD${r['total']:,} "
                 f"({len(r['detalle'])} item/s). Responde PAGADO {r['order_id']} al verificar "
                 f"el comprobante, o CANCELADO {r['order_id']}.")
         if ctx.escalado:
-            await wa.send_text(tenant, tenant.owner_wa,
+            await _avisar_dueno(tenant,
                 f"⚠️ Conversación escalada: {wa_from}. El bot dejó de responderle; tómala tú.")
     except Exception:
         log.exception("procesando mensaje de %s", wa_from)
