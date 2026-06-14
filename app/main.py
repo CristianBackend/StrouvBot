@@ -89,6 +89,7 @@ async def _handle(phone_id, wa_from, message_id, texto, tipo):
             session.commit()
         except IntegrityError:
             session.rollback()
+            log.info("mensaje %s ya procesado, ignorando (idempotencia)", message_id)
             return
 
         tenant = session.query(Tenant).filter(Tenant.wa_phone_id == phone_id).first()
@@ -120,6 +121,9 @@ async def _handle(phone_id, wa_from, message_id, texto, tipo):
         if key in _tasks:
             _tasks[key].cancel()
         _tasks[key] = asyncio.create_task(_flush_later(key, phone_id, wa_from))
+        log.info("debounce agendado para %s (%.1fs)", wa_from, DEBOUNCE_SECONDS)
+    except Exception:  # la task corre sin await; sin esto su excepción se traga silenciosa
+        log.exception("_handle reventó para %s (msg %s)", wa_from, message_id)
     finally:
         session.close()
 
@@ -131,6 +135,7 @@ async def _flush_later(key, phone_id, wa_from):
         return
     textos, _buffers[key] = _buffers.get(key, []), []
     _tasks.pop(key, None)
+    log.info("flush disparado para %s: %d mensaje(s) agrupado(s)", wa_from, len(textos))
     if textos:
         await _procesar(phone_id, wa_from, "\n".join(textos))
 
@@ -142,12 +147,15 @@ async def _procesar(phone_id, wa_from, texto):
     try:
         tenant = session.query(Tenant).filter(Tenant.wa_phone_id == phone_id).first()
         if not tenant or not tenant.activo:  # suspendido entre el debounce y ahora
+            log.info("procesar: tenant inexistente o suspendido para phone_id=%s", phone_id)
             return
         conv = session.get(Conversation, (tenant.id, wa_from)) or Conversation(
             tenant_id=tenant.id, cliente_wa=wa_from, history=[])
         if conv.escalada:
+            log.info("procesar: conversación escalada (escalada=1), bot en silencio: %s", wa_from)
             return  # un humano tiene la conversación; el bot se calla
 
+        log.info("procesar: llamando al modelo para %s", wa_from)
         ctx = ToolContext(session, tenant, wa_from)
         final = await responder(ctx, list(conv.history or []), texto)
 
