@@ -183,10 +183,18 @@ async def _ejecutar_tool(ctx: ToolContext, name: str, args: dict) -> dict:
 
 
 async def ejecutar_tool(ctx: ToolContext, name: str, args: dict) -> dict:
+    # DIAGNÓSTICO: loguea entrada/salida de cada tool. args puede traer PII (nombre/teléfono);
+    # recortar este log una vez identificado el bug del cierre.
+    log.info("tool ► %s args=%s", name, args)
     try:
-        return await _ejecutar_tool(ctx, name, args)
+        out = await _ejecutar_tool(ctx, name, args)
+        if isinstance(out, dict) and "error" in out:
+            log.warning("tool %s devolvió error (recuperable): %s", name, out["error"])
+        else:
+            log.info("tool %s OK", name)
+        return out
     except Exception as e:  # la excepción vuelve como tool_result, no tumba el turno
-        log.exception("tool %s falló", name)
+        log.exception("tool %s LANZÓ excepción (args=%s)", name, args)
         return {"error": f"{type(e).__name__}: {e}"}
 
 
@@ -202,8 +210,20 @@ async def responder(ctx: ToolContext, history: list, user_text: str) -> str:
         return claude.messages.create(model=MODEL_BRAIN, max_tokens=1024,
                                       system=system, tools=tools, messages=messages)
 
-    msg = await asyncio.to_thread(_call, work)
-    for _ in range(8):  # tope de iteraciones de tools por turno
+    async def _llamar_modelo(messages, paso):
+        # DIAGNÓSTICO: aísla los fallos de Anthropic (lo único en responder que dispara el
+        # fallback de I2). Loguea el paso exacto y re-lanza para no cambiar el comportamiento.
+        try:
+            return await asyncio.to_thread(_call, messages)
+        except Exception:
+            log.exception("Anthropic messages.create reventó en '%s' (cliente %s, %d msgs)",
+                          paso, ctx.cliente_wa, len(messages))
+            raise
+
+    msg = await _llamar_modelo(work, "llamada inicial")
+    for i in range(8):  # tope de iteraciones de tools por turno
+        log.info("loop iter %d (cliente %s): stop_reason=%s, bloques=%s",
+                 i, ctx.cliente_wa, msg.stop_reason, [b.type for b in msg.content])
         if msg.stop_reason != "tool_use":
             break
         results = []
@@ -214,6 +234,9 @@ async def responder(ctx: ToolContext, history: list, user_text: str) -> str:
                                 "content": json.dumps(out, ensure_ascii=False)})
         work.append({"role": "assistant", "content": msg.content})  # bloques crudos: SOLO local
         work.append({"role": "user", "content": results})
-        msg = await asyncio.to_thread(_call, work)
+        msg = await _llamar_modelo(work, f"seguimiento tras tools (iter {i})")
+    else:
+        log.warning("loop agotó las 8 iteraciones sin texto final (cliente %s, stop_reason=%s)",
+                    ctx.cliente_wa, msg.stop_reason)
 
     return "".join(b.text for b in msg.content if b.type == "text").strip()
