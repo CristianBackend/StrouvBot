@@ -195,3 +195,105 @@ def test_elige_promo_mas_favorable():
     ]}
     r = cotizar(PRODS, ENVIO_ZONAS, promos, [{"producto_id": "khamrah", "presentacion": "frasco", "cantidad": 1}], metodo_envio="retiro")
     assert r["descuento"] == 380  # eligió el mejor para el cliente
+
+
+# ── F1: envío por distancia (geolocalización) ────────────────────────────
+from app.money import haversine  # noqa: E402
+
+ORIGEN = {"lat": 18.4861, "lng": -69.9312}  # Santo Domingo
+# Offsets SOLO en latitud => distancia ≈ grados * 111.19 km, predecible:
+CLIENTE_CERCA = {"lat": 18.5061, "lng": -69.9312}   # +0.02° ≈ 2.2 km   -> rango 0-8
+CLIENTE_MEDIO = {"lat": 18.5861, "lng": -69.9312}   # +0.10° ≈ 11.1 km  -> rango 8-20
+CLIENTE_LEJOS = {"lat": 18.7861, "lng": -69.9312}   # +0.30° ≈ 33.4 km  -> >20
+
+ENVIO_DIST = {
+    "modo": "distancia",
+    "origen": ORIGEN,
+    "rangos": [
+        {"hasta_km": 8, "costo": 150},
+        {"hasta_km": 20, "costo": 250},
+        {"hasta_km": None, "costo": 400},   # franja abierta: cobra el máximo
+    ],
+    "retiro": {"activo": True, "nombre": "Retiro en tienda"},
+    "gratis_desde": 5000, "gratis_activo": True,
+}
+# Igual pero con tope duro (sin franja abierta) -> fuera de cobertura si excede.
+ENVIO_DIST_CAP = {**ENVIO_DIST, "rangos": ENVIO_DIST["rangos"][:2]}
+
+DECANT = [{"producto_id": "9pm", "presentacion": "decant", "cantidad": 1}]  # subtotal 400
+
+
+def qd(items, cfg=ENVIO_DIST, **kw):
+    return cotizar(PRODS, cfg, {"promos": []}, items, **kw)
+
+
+def test_haversine_un_grado_de_latitud():
+    assert abs(haversine(0, 0, 1, 0) - 111.19) < 0.5  # ~111 km por grado de latitud
+
+
+def test_distancia_rango_cercano():
+    r = qd(DECANT, ubicacion=CLIENTE_CERCA)
+    assert r["envio"] == 150 and r["total"] == 550
+    assert "distancia_km" in r and r["distancia_km"] < 8
+
+
+def test_distancia_rango_medio():
+    r = qd(DECANT, ubicacion=CLIENTE_MEDIO)
+    assert r["envio"] == 250 and 8 < r["distancia_km"] <= 20
+
+
+def test_distancia_franja_abierta_cobra_maximo():
+    r = qd(DECANT, ubicacion=CLIENTE_LEJOS)
+    assert r["envio"] == 400 and r["distancia_km"] > 20
+
+
+def test_distancia_tope_duro_fuera_de_cobertura():
+    r = qd(DECANT, cfg=ENVIO_DIST_CAP, ubicacion=CLIENTE_LEJOS)
+    assert r.get("error") == "fuera_de_cobertura"
+
+
+def test_distancia_retiro_gratis():
+    r = qd(DECANT, metodo_envio="retiro")
+    assert r["envio"] == 0 and r["metodo_envio"] == "Retiro en tienda"
+
+
+def test_distancia_retiro_no_disponible():
+    cfg = {**ENVIO_DIST, "retiro": {"activo": False}}
+    r = qd(DECANT, cfg=cfg, metodo_envio="retiro")
+    assert r.get("error") == "retiro_no_disponible"
+
+
+def test_distancia_falta_ubicacion():
+    r = qd(DECANT)  # sin pin y sin retiro
+    assert r.get("error") == "falta_ubicacion"
+
+
+def test_distancia_ubicacion_imprecisa():
+    r = qd(DECANT, ubicacion={**CLIENTE_CERCA, "precision": "baja"})
+    assert r.get("error") == "ubicacion_imprecisa"
+
+
+def test_distancia_sin_origen_no_configurado():
+    cfg = {**ENVIO_DIST, "origen": {}}
+    r = qd(DECANT, cfg=cfg, ubicacion=CLIENTE_CERCA)
+    assert r.get("error") == "envio_no_configurado"
+
+
+def test_distancia_envio_gratis_por_monto():
+    # 2 frascos khamrah = 7600 > 5000 -> envío gratis aunque esté lejos
+    r = qd([{"producto_id": "khamrah", "presentacion": "frasco", "cantidad": 2}],
+           ubicacion=CLIENTE_LEJOS)
+    assert r["envio"] == 0 and r["falta_para_envio_gratis"] == 0
+
+
+def test_distancia_lista_metodos_disponibles():
+    r = qd(DECANT, ubicacion=CLIENTE_CERCA)
+    ids = {m["id"] for m in r["metodos_envio_disponibles"]}
+    assert "retiro" in ids and any(i.startswith("rango_") for i in ids)
+
+
+def test_modo_zonas_sigue_intacto_con_pin_ignorado():
+    # un tenant de zonas no se ve afectado por pasar ubicacion (la ignora)
+    r = cotizar(PRODS, ENVIO_ZONAS, {"promos": []}, DECANT,
+                metodo_envio="gsd", ubicacion=CLIENTE_CERCA)
+    assert r["envio"] == 200 and r["metodo_envio"] == "Gran Santo Domingo"
