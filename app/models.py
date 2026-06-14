@@ -1,7 +1,7 @@
 """Modelo de datos. Todo scoped por tenant_id (multi-tenant estricto)."""
 import datetime as dt
 
-from sqlalchemy import (JSON, Column, DateTime, ForeignKey, Integer, String, Text,
+from sqlalchemy import (JSON, Column, DateTime, Float, ForeignKey, Integer, String, Text,
                         UniqueConstraint, create_engine)
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -75,6 +75,8 @@ class Order(Base):
     pago = Column(String, default="")
     estado = Column(String, nullable=False, default="pago_pendiente_verificacion")
     # estado ∈ {pago_pendiente_verificacion, pagado, despachado, cancelado}
+    ubicacion = Column(JSON, nullable=True)           # {lat, lng} del cliente (despacho, modo distancia)
+    distancia_km = Column(Float, nullable=True)       # distancia negocio→cliente al cotizar
     created_at = Column(DateTime, default=dt.datetime.utcnow)
 
 
@@ -84,6 +86,7 @@ class Conversation(Base):
     cliente_wa = Column(String, primary_key=True)
     history = Column(JSON, nullable=False, default=list)   # [{role, content: str}] — solo textos
     escalada = Column(Integer, default=0)                   # 1 = un humano tomó la conversación
+    ultima_ubicacion = Column(JSON, nullable=True)          # {lat, lng, fuente, ts} — pin del cliente (modo distancia)
     updated_at = Column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow)
 
 

@@ -6,10 +6,20 @@ verificando filas afectadas. Si dos clientes compran el último frasco a la vez,
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .models import Order, Product, Tenant
+from .models import Conversation, Order, Product, Tenant
 from .money import agregar_items, cotizar
 
 _STOCK_COL = {"frasco": "stock_frasco", "decant": "stock_decant"}
+
+
+def ubicacion_de_conversacion(session: Session, tenant_id: str, cliente_wa: str):
+    """Pin/ubicación guardada del cliente (modo distancia). El backend la resuelve; el modelo
+    NUNCA pasa coordenadas. F3 añadirá geocodificación cuando no haya pin."""
+    conv = session.get(Conversation, (tenant_id, cliente_wa))
+    u = (conv.ultima_ubicacion if conv else None) or {}
+    if u.get("lat") is not None and u.get("lng") is not None:
+        return {"lat": u["lat"], "lng": u["lng"], "precision": u.get("precision")}
+    return None
 
 
 def productos_de(session: Session, tenant_id: str) -> dict:
@@ -21,18 +31,29 @@ def productos_de(session: Session, tenant_id: str) -> dict:
             for p in rows}
 
 
+def _es_distancia(tenant: Tenant) -> bool:
+    return (tenant.envio_config or {}).get("modo") == "distancia"
+
+
 def cotizar_db(session: Session, tenant: Tenant, items: list,
-               metodo_envio: str = "auto", aplicar_promo: str = "auto") -> dict:
+               metodo_envio: str = "auto", aplicar_promo: str = "auto",
+               cliente_wa: str = None) -> dict:
+    ubic = None
+    if _es_distancia(tenant) and cliente_wa:
+        ubic = ubicacion_de_conversacion(session, tenant.id, cliente_wa)
     return cotizar(productos_de(session, tenant.id), tenant.envio_config,
-                   tenant.descuento_config, items, metodo_envio, aplicar_promo)
+                   tenant.descuento_config, items, metodo_envio, aplicar_promo, ubicacion=ubic)
 
 
 def registrar_pedido(session: Session, tenant: Tenant, cliente_wa: str, items: list,
                      nombre: str, direccion: str, telefono: str, pago: str = "",
                      metodo_envio: str = "auto") -> dict:
-    cot = cotizar_db(session, tenant, items, metodo_envio)
+    cot = cotizar_db(session, tenant, items, metodo_envio, cliente_wa=cliente_wa)
     if "error" in cot:
-        return cot  # no se registra un pedido inválido
+        return cot  # no se registra un pedido inválido (incl. señales de ubicación)
+
+    # Ubicación para el despacho (modo distancia): el mismo pin con que se cotizó.
+    ubic = ubicacion_de_conversacion(session, tenant.id, cliente_wa) if _es_distancia(tenant) else None
 
     # Reserva atómica de stock por (producto, presentación) agregada.
     try:
@@ -49,7 +70,9 @@ def registrar_pedido(session: Session, tenant: Tenant, cliente_wa: str, items: l
 
         order = Order(tenant_id=tenant.id, cliente_wa=cliente_wa, nombre=nombre,
                       direccion=direccion, telefono=telefono, items=items,
-                      total=cot["total"], pago=pago)
+                      total=cot["total"], pago=pago,
+                      ubicacion={"lat": ubic["lat"], "lng": ubic["lng"]} if ubic else None,
+                      distancia_km=cot.get("distancia_km"))
         session.add(order)
         session.commit()
         session.expire_all()  # los UPDATE crudos invalidan la caché ORM; refrescar lecturas

@@ -32,15 +32,23 @@ _ITEM_SCHEMA = {
     "required": ["producto_id", "presentacion", "cantidad"],
 }
 
-def _metodo_envio_schema(tenant: Tenant) -> dict:
-    """Schema de metodo_envio con los ids REALES de las zonas del tenant.
+def _metodo_envio_schema(tenant: Tenant):
+    """Schema de metodo_envio según el modo de envío del tenant.
 
-    El enum debe reflejar la config del negocio; si se hardcodea, el modelo
-    queda obligado por la API a mandar ids que no existen y cotizar() siempre
-    falla con "método de envío desconocido" → el bot no puede cerrar y escala.
+    - zonas: enum con los ids REALES de las zonas (si se hardcodea, la API obliga al modelo a
+      mandar ids inexistentes y cotizar() falla → el bot escala).
+    - distancia: el envío sale del pin del cliente (lo resuelve el backend), el modelo no elige
+      zona; solo puede pedir 'retiro' si está activo. Devuelve None si no hay método que elegir.
     """
-    cfg = _norm_envio(tenant.envio_config or {})
-    ids = [m["id"] for m in cfg.get("metodos", []) if m.get("id")]
+    cfg = tenant.envio_config or {}
+    if cfg.get("modo") == "distancia":
+        if (cfg.get("retiro") or {}).get("activo"):
+            return {"type": "string", "enum": ["retiro"],
+                    "description": "déjalo VACÍO para envío a domicilio (se calcula por la ubicación "
+                                   "que comparte el cliente); 'retiro' solo si retira en tienda"}
+        return None  # sin retiro: el envío es 100% por ubicación, no hay nada que elegir
+    cfg_n = _norm_envio(cfg)
+    ids = [m["id"] for m in cfg_n.get("metodos", []) if m.get("id")]
     schema = {"type": "string",
               "description": "id de la zona/método de envío del negocio (ver 'Envío' en el system)"}
     if ids:  # un enum vacío es inválido para la API; sin ids, dejarlo string libre
@@ -49,23 +57,24 @@ def _metodo_envio_schema(tenant: Tenant) -> dict:
 
 
 def build_tools(tenant: Tenant) -> list:
-    """Tools por-tenant: el enum de metodo_envio se llena con las zonas reales."""
+    """Tools por-tenant. metodo_envio refleja el modo de envío; se omite si no aplica."""
     metodo_envio = _metodo_envio_schema(tenant)
+    cotizar_props = {"items": {"type": "array", "items": _ITEM_SCHEMA}}
+    reg_props = {"items": {"type": "array", "items": _ITEM_SCHEMA},
+                 "nombre": {"type": "string"}, "direccion": {"type": "string"},
+                 "telefono": {"type": "string"}, "pago": {"type": "string"}}
+    if metodo_envio is not None:
+        cotizar_props["metodo_envio"] = metodo_envio
+        reg_props["metodo_envio"] = metodo_envio
     return [
         {"name": "cotizar",
          "description": "Calcula el total real (envío y promos aplicados) antes de cerrar. Único que decide el precio.",
-         "input_schema": {"type": "object", "properties": {
-             "items": {"type": "array", "items": _ITEM_SCHEMA},
-             "metodo_envio": metodo_envio},
-             "required": ["items"]}},
+         "input_schema": {"type": "object", "properties": cotizar_props,
+                          "required": ["items"]}},
         {"name": "registrar_pedido",
          "description": "Registra el pedido al confirmar nombre, dirección y teléfono (antes del pago).",
-         "input_schema": {"type": "object", "properties": {
-             "items": {"type": "array", "items": _ITEM_SCHEMA},
-             "nombre": {"type": "string"}, "direccion": {"type": "string"},
-             "telefono": {"type": "string"}, "pago": {"type": "string"},
-             "metodo_envio": metodo_envio},
-             "required": ["items", "nombre", "direccion", "telefono"]}},
+         "input_schema": {"type": "object", "properties": reg_props,
+                          "required": ["items", "nombre", "direccion", "telefono"]}},
         {"name": "enviar_datos_pago",
          "description": "Envía al cliente el mensaje literal con la cuenta. Tú nunca escribes el número.",
          "input_schema": {"type": "object", "properties": {}}},
@@ -89,7 +98,20 @@ def build_system(tenant: Tenant, productos: dict) -> str:
         for pid, p in productos.items()
     )
     e = tenant.envio_config or {}
-    if e.get("metodos"):
+    if e.get("modo") == "distancia":
+        tramos = []
+        for r in e.get("rangos", []):
+            tope = r.get("hasta_km")
+            etiqueta = f"hasta {tope} km" if tope is not None else "más lejos"
+            tramos.append(f"{etiqueta}: RD${r.get('costo', 0)}")
+        envio = ("Envío a domicilio por distancia (" + "; ".join(tramos) + ")") if tramos else "Envío por distancia"
+        if (e.get("retiro") or {}).get("activo"):
+            envio += f". {(e['retiro']).get('nombre', 'Retiro en tienda')} gratis"
+        if e.get("gratis_activo") and e.get("gratis_desde", 0) > 0:
+            envio += f". Envío gratis en compras de RD${e['gratis_desde']}+"
+        envio += (". El envío se calcula con la ubicación que comparte el cliente (pin de WhatsApp); "
+                  "el sistema da el costo al cotizar.")
+    elif e.get("metodos"):
         partes = []
         for m in e["metodos"]:
             if m.get("tipo") == "retiro":
@@ -151,7 +173,7 @@ class ToolContext:
 async def _ejecutar_tool(ctx: ToolContext, name: str, args: dict) -> dict:
     if name == "cotizar":
         return cotizar_db(ctx.session, ctx.tenant, args.get("items", []),
-                          args.get("metodo_envio", "auto"))
+                          args.get("metodo_envio", "auto"), cliente_wa=ctx.cliente_wa)
     if name == "registrar_pedido":
         r = registrar_pedido(ctx.session, ctx.tenant, ctx.cliente_wa, args.get("items", []),
                              args.get("nombre", ""), args.get("direccion", ""),

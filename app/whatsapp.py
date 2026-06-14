@@ -36,8 +36,10 @@ async def send_document(tenant, to: str, doc_url: str, filename: str = "catalogo
 
 def parse_webhook(body: dict):
     """
-    Payload de Meta -> lista de (phone_id, wa_from, message_id, texto, tipo).
-    tipo: 'text' | 'image' | otro. Para imágenes (comprobantes) texto va vacío.
+    Payload de Meta -> lista de (phone_id, wa_from, message_id, texto, tipo, extra).
+    tipo: 'text' | 'image' | 'location' | otro.
+    - texto: el cuerpo en 'text'; vacío en el resto (imágenes/comprobantes, ubicación).
+    - extra: para 'location' = {"lat": float, "lng": float}; None en el resto.
     """
     out = []
     for entry in body.get("entry", []):
@@ -47,5 +49,9 @@ def parse_webhook(body: dict):
             for msg in value.get("messages", []) or []:
                 tipo = msg.get("type")
                 texto = msg.get("text", {}).get("body", "") if tipo == "text" else ""
-                out.append((phone_id, msg.get("from"), msg.get("id"), texto, tipo))
+                extra = None
+                if tipo == "location":
+                    loc = msg.get("location", {}) or {}
+                    extra = {"lat": loc.get("latitude"), "lng": loc.get("longitude")}
+                out.append((phone_id, msg.get("from"), msg.get("id"), texto, tipo, extra))
     return out

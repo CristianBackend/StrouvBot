@@ -297,3 +297,52 @@ def test_modo_zonas_sigue_intacto_con_pin_ignorado():
     r = cotizar(PRODS, ENVIO_ZONAS, {"promos": []}, DECANT,
                 metodo_envio="gsd", ubicacion=CLIENTE_CERCA)
     assert r["envio"] == 200 and r["metodo_envio"] == "Gran Santo Domingo"
+
+
+# ── F2: integración con BD (pin guardado -> cotizar_db/registrar_pedido) ──
+from app.models import Conversation, Order, Product, Tenant  # noqa: E402
+from app.orders import cotizar_db  # noqa: E402
+
+
+def _tenant_distancia(session):
+    if not session.get(Tenant, "geo_shop"):
+        session.add(Tenant(
+            id="geo_shop", nombre="Geo", rubro="perfumes",
+            wa_phone_id="GEOPID", wa_token="x", owner_wa="1809",
+            envio_config={"modo": "distancia", "origen": {"lat": 18.4861, "lng": -69.9312},
+                          "rangos": [{"hasta_km": 8, "costo": 150}, {"hasta_km": 20, "costo": 250},
+                                     {"hasta_km": None, "costo": 400}],
+                          "retiro": {"activo": True}, "gratis_desde": 5000, "gratis_activo": True},
+            pago_config="x", cuenta_mensaje="x", descuento_config={"promos": []}))
+        session.add(Product(id="p1", tenant_id="geo_shop", nombre="Perfume X", tipo="x",
+                            precio_frasco=2000, precio_decant=400, stock_frasco=10, stock_decant=10))
+        session.commit()
+    return session.get(Tenant, "geo_shop")
+
+
+def test_distancia_e2e_pin_guardado(session):
+    tenant = _tenant_distancia(session)
+    cliente = "18491112222"
+    session.merge(Conversation(tenant_id="geo_shop", cliente_wa=cliente, history=[],
+                               ultima_ubicacion={"lat": 18.5061, "lng": -69.9312, "fuente": "pin"}))
+    session.commit()
+    item = [{"producto_id": "p1", "presentacion": "decant", "cantidad": 1}]
+
+    cot = cotizar_db(session, tenant, item, cliente_wa=cliente)   # resuelve el pin guardado
+    assert cot["envio"] == 150 and "distancia_km" in cot
+
+    sin_pin = cotizar_db(session, tenant, item)                   # sin cliente_wa -> sin ubicación
+    assert sin_pin.get("error") == "falta_ubicacion"
+
+    r = registrar_pedido(session, tenant, cliente, item, "Ana", "Capotillo, ref. colmado", "8090000")
+    assert "order_id" in r
+    o = session.get(Order, r["order_id"])
+    assert o.ubicacion == {"lat": 18.5061, "lng": -69.9312} and o.distancia_km is not None
+
+
+def test_distancia_e2e_retiro_sin_pin(session):
+    tenant = _tenant_distancia(session)
+    item = [{"producto_id": "p1", "presentacion": "decant", "cantidad": 1}]
+    # retiro no necesita pin
+    cot = cotizar_db(session, tenant, item, metodo_envio="retiro", cliente_wa="18493334444")
+    assert cot["envio"] == 0

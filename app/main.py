@@ -7,6 +7,7 @@ Verificación de pago sin panel (v1): el dueño responde por WhatsApp
 "PAGADO <id>" / "DESPACHADO <id>" / "CANCELADO <id>" y eso actualiza el pedido.
 """
 import asyncio
+import datetime as dt
 import json
 import logging
 import re
@@ -74,13 +75,13 @@ async def inbound(request: Request):
     body = json.loads(raw)
     msgs = wa.parse_webhook(body)
     log.info("webhook POST recibido: %d mensaje(s) | keys=%s", len(msgs), list(body.keys()))
-    for phone_id, wa_from, message_id, texto, tipo in msgs:
+    for phone_id, wa_from, message_id, texto, tipo, extra in msgs:
         log.info("  -> phone_id=%s from=%s tipo=%s", phone_id, wa_from, tipo)
-        asyncio.create_task(_handle(phone_id, wa_from, message_id, texto, tipo))
+        asyncio.create_task(_handle(phone_id, wa_from, message_id, texto, tipo, extra))
     return {"ok": True}  # 200 inmediato; todo lo demás es async
 
 
-async def _handle(phone_id, wa_from, message_id, texto, tipo):
+async def _handle(phone_id, wa_from, message_id, texto, tipo, extra=None):
     session = SessionLocal()
     try:
         # Idempotencia: ignora message_id ya vistos (Meta reintenta).
@@ -108,6 +109,17 @@ async def _handle(phone_id, wa_from, message_id, texto, tipo):
                 msg = r.get("error") or f"✅ Pedido #{r['order_id']} → {r['estado']} ({r['nombre']}, RD${r['total']:,})"
                 await wa.send_text(tenant, wa_from, msg)
                 return
+
+        # Ubicación del cliente: guarda el pin en la conversación (lo lee cotizar/registrar_pedido
+        # en modo distancia) y pasa un evento al flujo para que el modelo cotice.
+        if tipo == "location" and extra and extra.get("lat") is not None and extra.get("lng") is not None:
+            conv = session.get(Conversation, (tenant.id, wa_from)) or Conversation(
+                tenant_id=tenant.id, cliente_wa=wa_from, history=[])
+            conv.ultima_ubicacion = {"lat": extra["lat"], "lng": extra["lng"],
+                                     "fuente": "pin", "ts": dt.datetime.utcnow().isoformat()}
+            session.merge(conv)
+            session.commit()
+            texto = "[el cliente compartió su ubicación 📍]"
 
         # Imagen del cliente = casi siempre comprobante: pásala al flujo como evento.
         if tipo == "image":
